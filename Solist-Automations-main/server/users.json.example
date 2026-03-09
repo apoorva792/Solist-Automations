@@ -1,0 +1,23 @@
+{
+  "demo@alister.ai": {
+    "email": "demo@alister.ai",
+    "password": "alister2024",
+    "name": "Demo User",
+    "company": "Your Company",
+    "credits": 100
+  },
+  "admin@alaiy.com": {
+    "email": "admin@alaiy.com",
+    "password": "123",
+    "name": "Admin",
+    "company": "alaiy",
+    "credits": 100
+  },
+  "lucaszunz@thesolist.com": {
+    "email": "lucaszunz@thesolist.com",
+    "password": "alister2026",
+    "name": "Lucas",
+    "company": "The Solist",
+    "credits": 100
+  }
+}
