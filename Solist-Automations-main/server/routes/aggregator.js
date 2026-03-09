@@ -30,6 +30,173 @@ const upload = multer({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// STRICT RELEVANCE FILTERING HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Common filler words to ignore when computing keyword overlap */
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'from', 'is', 'it', 'as', 'was', 'are', 'be',
+  'this', 'that', 'new', 'buy', 'shop', 'sale', 'free', 'shipping',
+  'online', 'store', 'price', 'best', 'top', 'official', '-', '–', '|',
+  'mm', 'cm', 'ml', 'oz', 'kg', 'lb'
+]);
+
+/**
+ * Extract model numbers / identifiers from a product title.
+ * Looks for alphanumeric patterns that are likely model identifiers:
+ *   - "126610LN", "SM-S928B", "MBP-14-M3", "A2779", "NH35A"
+ *   - Patterns with mixed letters+digits, or digits+letters, optionally with hyphens/dots
+ */
+function extractModelNumbers(title) {
+  if (!title) return [];
+  const models = [];
+  // Match patterns like: 126610LN, SM-S928B, A2779, REF.126610, PAM01312, etc.
+  const patterns = [
+    /\b([A-Z]{1,5}[-.]?\d{3,}[A-Z]{0,5}[-.]?\d{0,5}[A-Z]{0,3})\b/gi,  // e.g. SM-S928B, A2779, PAM01312
+    /\b(\d{3,}[-.]?[A-Z]{1,5}[-.]?\d{0,5})\b/gi,                        // e.g. 126610LN, 5711/1A
+    /\b(ref\.?\s*[A-Z0-9][-A-Z0-9.]{3,})\b/gi,                          // e.g. Ref. 126610LN
+    /\b([A-Z]{2,}\d+[-/][A-Z0-9]+)\b/gi,                                 // e.g. MBP-14/M3
+  ];
+  const seen = new Set();
+  for (const pat of patterns) {
+    let m;
+    while ((m = pat.exec(title)) !== null) {
+      const clean = m[1].replace(/^ref\.?\s*/i, '').toUpperCase().trim();
+      if (clean.length >= 3 && !seen.has(clean)) {
+        seen.add(clean);
+        models.push(clean);
+      }
+    }
+  }
+  return models;
+}
+
+/**
+ * Tokenize a title into meaningful keywords (lowercased, stop words removed).
+ */
+function tokenize(title) {
+  if (!title) return [];
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s\-]/g, ' ')
+    .split(/\s+/)
+    .map(w => w.replace(/^-+|-+$/g, ''))
+    .filter(w => w.length >= 2 && !STOP_WORDS.has(w));
+}
+
+/**
+ * Compute keyword overlap ratio between source tokens and result tokens.
+ * Returns a value between 0 and 1 (fraction of source keywords found in result).
+ */
+function keywordOverlap(sourceTokens, resultTokens) {
+  if (!sourceTokens.length) return 0;
+  const resultSet = new Set(resultTokens);
+  let matches = 0;
+  for (const token of sourceTokens) {
+    if (resultSet.has(token)) matches++;
+  }
+  return matches / sourceTokens.length;
+}
+
+/**
+ * Check if any model number from the source appears in the result title.
+ */
+function hasModelMatch(sourceModels, resultTitle) {
+  if (!sourceModels.length || !resultTitle) return false;
+  const upper = resultTitle.toUpperCase();
+  return sourceModels.some(model => upper.includes(model));
+}
+
+/**
+ * Score and assign relevanceTier to a result based on source product info.
+ * Returns { score, relevanceTier } or null if result should be excluded.
+ */
+function scoreResult(result, { sourceTitle, sourceBrand, sourceModels, sourceTokens }) {
+  const resultTitle = result.title || '';
+  const resultTokens = tokenize(resultTitle);
+  const overlap = keywordOverlap(sourceTokens, resultTokens);
+  const brandMatch = sourceBrand &&
+    resultTitle.toLowerCase().includes(sourceBrand.toLowerCase());
+  const modelMatch = hasModelMatch(sourceModels, resultTitle);
+
+  let tier;
+  let score;
+
+  if (modelMatch && brandMatch) {
+    tier = 'exact';
+    score = 100;
+  } else if (modelMatch) {
+    tier = 'exact';
+    score = 95;
+  } else if (brandMatch && overlap >= 0.7) {
+    tier = 'strong';
+    score = 80;
+  } else if (brandMatch && overlap >= 0.4) {
+    tier = 'partial';
+    score = 60;
+  } else if (overlap >= 0.5) {
+    tier = 'partial';
+    score = 50;
+  } else {
+    // Below threshold — exclude
+    return null;
+  }
+
+  return { score, relevanceTier: tier };
+}
+
+/**
+ * Apply strict relevance filtering to Lens results.
+ * Filters, scores, sorts, deduplicates by domain, and caps at maxResults.
+ */
+function filterAndScoreResults(lensResults, { sourceUrl, sourceTitle, sourceBrand, sourceSku, maxResults = 5 }) {
+  const isSolistSource = sourceUrl.toLowerCase().includes('thesolist.com');
+  const sourceModels = extractModelNumbers(sourceTitle);
+  const sourceTokens = tokenize(sourceTitle);
+
+  // Also treat SKU as a model number if available
+  if (sourceSku && sourceSku.length >= 3) {
+    const skuUpper = sourceSku.toUpperCase();
+    if (!sourceModels.includes(skuUpper)) sourceModels.push(skuUpper);
+  }
+
+  console.log(`[Filter] Source models: [${sourceModels.join(', ')}] | Source tokens: [${sourceTokens.join(', ')}]`);
+
+  const scored = [];
+  for (const r of lensResults) {
+    // Basic exclusions
+    if (r.url === sourceUrl) continue;
+    if (isSolistSource && r.url.toLowerCase().includes('thesolist.com')) continue;
+    if (isLowQualityDomain(r.url)) continue;
+
+    const result = scoreResult(r, { sourceTitle, sourceBrand, sourceModels, sourceTokens });
+    if (!result) {
+      console.log(`[Filter] Excluded (low relevance): "${r.title?.slice(0, 60)}"`);
+      continue;
+    }
+
+    scored.push({ ...r, ...result });
+  }
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  // Deduplicate by domain, cap at maxResults
+  const seenDomains = new Set();
+  const filtered = [];
+  for (const r of scored) {
+    if (seenDomains.has(r.domain)) continue;
+    seenDomains.add(r.domain);
+    filtered.push(r);
+    if (filtered.length >= maxResults) break;
+  }
+
+  console.log(`[Filter] ${lensResults.length} Lens results → ${scored.length} scored → ${filtered.length} final`);
+  return filtered;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GEMINI API HELPERS FOR SPEC EXTRACTION
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -753,29 +920,16 @@ router.post('/search', async (req, res) => {
       console.warn('[Aggregator] No image available for Lens search');
     }
 
-    // Step 4: Simple filter + sort — trust Lens ordering, prefer brand matches, cap at 5
+    // Step 4: Strict relevance filtering — model number + keyword matching
     const sourceUrl = sourceProduct?.url || '';
     const isSolistSource = sourceUrl.toLowerCase().includes('thesolist.com');
-    const sorted = lensResults
-      .filter(r => r.url !== sourceUrl)
-      .filter(r => !(isSolistSource && r.url.toLowerCase().includes('thesolist.com')))
-      .filter(r => !isLowQualityDomain(r.url))
-      .sort((a, b) => {
-        const aBrand = productBrand && a.title?.toLowerCase().includes(productBrand.toLowerCase()) ? 1 : 0;
-        const bBrand = productBrand && b.title?.toLowerCase().includes(productBrand.toLowerCase()) ? 1 : 0;
-        if (bBrand !== aBrand) return bBrand - aBrand;
-        return 0; // trust Lens ordering
-      });
-
-    // One result per domain — keep first from each site
-    const seenDomains = new Set();
-    const filteredResults = [];
-    for (const r of sorted) {
-      if (seenDomains.has(r.domain)) continue;
-      seenDomains.add(r.domain);
-      filteredResults.push(r);
-      if (filteredResults.length >= 5) break;
-    }
+    const filteredResults = filterAndScoreResults(lensResults, {
+      sourceUrl,
+      sourceTitle: productTitle,
+      sourceBrand: productBrand,
+      sourceSku: productSku,
+      maxResults: 5
+    });
 
     // Step 5: If source is from The Solist, prepend it as first result for comparison
     const allResults = isSolistSource && sourceProduct

@@ -13,6 +13,85 @@ const {
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Strict Relevance Filtering (shared logic with aggregator) ───
+
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+  'of', 'with', 'by', 'from', 'is', 'it', 'as', 'was', 'are', 'be',
+  'this', 'that', 'new', 'buy', 'shop', 'sale', 'free', 'shipping',
+  'online', 'store', 'price', 'best', 'top', 'official', '-', '–', '|',
+  'mm', 'cm', 'ml', 'oz', 'kg', 'lb'
+]);
+
+function extractModelNumbers(title) {
+  if (!title) return [];
+  const models = [];
+  const patterns = [
+    /\b([A-Z]{1,5}[-.]?\d{3,}[A-Z]{0,5}[-.]?\d{0,5}[A-Z]{0,3})\b/gi,
+    /\b(\d{3,}[-.]?[A-Z]{1,5}[-.]?\d{0,5})\b/gi,
+    /\b(ref\.?\s*[A-Z0-9][-A-Z0-9.]{3,})\b/gi,
+    /\b([A-Z]{2,}\d+[-/][A-Z0-9]+)\b/gi,
+  ];
+  const seen = new Set();
+  for (const pat of patterns) {
+    let m;
+    while ((m = pat.exec(title)) !== null) {
+      const clean = m[1].replace(/^ref\.?\s*/i, '').toUpperCase().trim();
+      if (clean.length >= 3 && !seen.has(clean)) {
+        seen.add(clean);
+        models.push(clean);
+      }
+    }
+  }
+  return models;
+}
+
+function tokenize(title) {
+  if (!title) return [];
+  return title.toLowerCase().replace(/[^a-z0-9\s\-]/g, ' ').split(/\s+/)
+    .map(w => w.replace(/^-+|-+$/g, '')).filter(w => w.length >= 2 && !STOP_WORDS.has(w));
+}
+
+function keywordOverlap(sourceTokens, resultTokens) {
+  if (!sourceTokens.length) return 0;
+  const resultSet = new Set(resultTokens);
+  let matches = 0;
+  for (const token of sourceTokens) { if (resultSet.has(token)) matches++; }
+  return matches / sourceTokens.length;
+}
+
+function hasModelMatch(sourceModels, resultTitle) {
+  if (!sourceModels.length || !resultTitle) return false;
+  const upper = resultTitle.toUpperCase();
+  return sourceModels.some(model => upper.includes(model));
+}
+
+function scoreResult(result, { sourceBrand, sourceModels, sourceTokens }) {
+  const resultTitle = result.title || '';
+  const resultTokens = tokenize(resultTitle);
+  const overlap = keywordOverlap(sourceTokens, resultTokens);
+  const brandMatch = sourceBrand && resultTitle.toLowerCase().includes(sourceBrand.toLowerCase());
+  const modelMatch = hasModelMatch(sourceModels, resultTitle);
+
+  if (modelMatch && brandMatch) return { score: 100, relevanceTier: 'exact' };
+  if (modelMatch) return { score: 95, relevanceTier: 'exact' };
+  if (brandMatch && overlap >= 0.7) return { score: 80, relevanceTier: 'strong' };
+  if (brandMatch && overlap >= 0.4) return { score: 60, relevanceTier: 'partial' };
+  if (overlap >= 0.5) return { score: 50, relevanceTier: 'partial' };
+  return null; // exclude
+}
+
+/** Low-quality domain filter */
+function isLowQualityDomain(url) {
+  if (!url) return true;
+  const patterns = [
+    /alibaba/i, /aliexpress/i, /dhgate/i, /wish\.com/i, /temu\.com/i,
+    /shein\.com/i, /pinterest/i, /facebook/i, /instagram/i, /twitter/i,
+    /reddit/i, /youtube/i, /tiktok/i, /\/search/i, /\/category/i, /\/collection/i
+  ];
+  return patterns.some(p => p.test(url));
+}
+
 function parsePriceAmount(str) {
   if (!str) return null;
   const cleaned = String(str).replace(/[^0-9.,]/g, '').replace(/,/g, '');
@@ -287,31 +366,48 @@ router.post('/compare', async (req, res) => {
 
     console.log(`[Price] Total Lens results: ${lensResults.length}`);
 
-    // Step 3: Build listing URLs from Lens results
+    // Step 3: Build listing URLs from Lens results with strict relevance filtering
     const inputUrl = url?.trim()?.split('?')[0] || '';
     const isSolistInput = inputUrl.toLowerCase().includes('thesolist.com');
+    const sourceModels = extractModelNumbers(productTitle);
+    const sourceTokens = tokenize(productTitle);
+    if (productSku && productSku.length >= 3) {
+      const skuUpper = productSku.toUpperCase();
+      if (!sourceModels.includes(skuUpper)) sourceModels.push(skuUpper);
+    }
+    console.log(`[Price] Source models: [${sourceModels.join(', ')}] | Source tokens: [${sourceTokens.join(', ')}]`);
+
     const seen = new Set();
     const seenDomains = new Set();
     const listings = [];
     for (const item of lensResults) {
       const itemUrl = item.link || item.url || item.product_link || item.page_url;
       if (!itemUrl || !itemUrl.startsWith('http') || itemUrl.includes('google.com')) continue;
-      // Skip any thesolist.com results when source is from The Solist (we prepend it ourselves)
       if (isSolistInput && itemUrl.toLowerCase().includes('thesolist.com')) continue;
+      if (isLowQualityDomain(itemUrl)) continue;
       const key = itemUrl.split('?')[0].toLowerCase();
       if (seen.has(key)) continue;
-      // One result per domain — keep first, skip duplicates
       const domain = extractDomain(itemUrl);
       if (seenDomains.has(domain)) continue;
-      seen.add(key);
-      seenDomains.add(domain);
-      listings.push({
+
+      const resultItem = {
         url: itemUrl,
         title: item.title || item.name || '',
         platform: friendlyPlatformName(itemUrl),
         domain,
         lensPrice: item.price ? (typeof item.price === 'object' ? item.price.value ?? item.price.extracted : item.price) : null
-      });
+      };
+
+      // Apply strict relevance scoring
+      const relevance = scoreResult(resultItem, { sourceBrand: productBrand, sourceModels, sourceTokens });
+      if (!relevance) {
+        console.log(`[Price] Excluded (low relevance): "${resultItem.title?.slice(0, 60)}"`);
+        continue;
+      }
+
+      seen.add(key);
+      seenDomains.add(domain);
+      listings.push({ ...resultItem, ...relevance });
     }
 
     console.log(`[Price] ${listings.length} unique listings to fetch prices from`);
