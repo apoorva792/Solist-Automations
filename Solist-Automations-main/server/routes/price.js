@@ -351,16 +351,9 @@ router.post('/compare', async (req, res) => {
         console.warn(`[Price] Lens exact_matches failed:`, e.message);
       }
 
-      // Fallback: if exact_matches returned 0 results, try visual_matches
+      // Fallback: if exact_matches returned 0 results, log it but don't make a second slow Lens call
       if (lensResults.length === 0) {
-        try {
-          console.log(`[Price] Falling back to visual_matches...`);
-          const lensData = await lensSearch(productImageUrl, { brdLens: 'visual_matches' });
-          lensResults = collectLensLinks(lensData);
-          console.log(`[Price] Lens visual_matches: ${lensResults.length} results`);
-        } catch (e) {
-          console.warn(`[Price] Lens visual_matches failed:`, e.message);
-        }
+        console.log(`[Price] exact_matches returned 0 results — skipping visual_matches fallback to save time`);
       }
     }
 

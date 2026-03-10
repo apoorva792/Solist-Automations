@@ -896,24 +896,12 @@ router.post('/search', async (req, res) => {
         console.warn(`[Aggregator] Lens exact_matches failed:`, err.message);
       }
 
-      // Fallback: if exact_matches returned 0 results, try visual_matches
+      // Fallback: if exact_matches returned 0 results, log it but don't make a second slow Lens call
       if (lensResults.length === 0) {
-        try {
-          console.log(`[Aggregator] Falling back to visual_matches...`);
-          const lensData = await lensSearch(productImageUrl, { brdLens: 'visual_matches' });
-          lensResults = parseLensResults(lensData);
-          lensDebug.resultCount = lensResults.length;
-          lensDebug.tab = 'visual_matches';
-          lensDebug.error = null;
-          console.log(`[Aggregator] Lens visual_matches: ${lensResults.length} results`);
-        } catch (err) {
-          lensDebug.error = err.message;
-          console.warn(`[Aggregator] Lens visual_matches failed:`, err.message);
+        console.log(`[Aggregator] exact_matches returned 0 results — skipping visual_matches fallback to save time`);
+        if (!lensDebug.error) {
+          lensDebug.error = 'No product links found in exact_matches.';
         }
-      }
-
-      if (lensResults.length === 0 && !lensDebug.error) {
-        lensDebug.error = 'No product links found in exact_matches or visual_matches.';
       }
     } else {
       lensDebug.error = 'No product image available for Lens search';

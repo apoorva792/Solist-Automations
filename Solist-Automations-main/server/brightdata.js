@@ -63,7 +63,7 @@ async function serpSearch(query, options = {}) {
         },
         body: JSON.stringify(payload)
       },
-      90000
+      45000
     );
 
     if (!response.ok) {
@@ -87,7 +87,7 @@ async function serpSearch(query, options = {}) {
     return serpData?.organic || serpData?.results || [];
   } catch (err) {
     if (err.name === 'AbortError') {
-      throw new Error('SERP request timed out (taking longer than 90s)');
+      throw new Error('SERP request timed out (taking longer than 45s)');
     }
     throw err;
   }
@@ -98,7 +98,7 @@ async function serpSearch(query, options = {}) {
  * Returns an object with HTML body, status code, and availability info.
  */
 async function unlockUrl(targetUrl, options = {}) {
-  const { country = 'us', retries = 1 } = options;
+  const { country = 'us', retries = 0 } = options;
   const url = 'https://api.brightdata.com/request';
 
   const payload = {
@@ -114,7 +114,7 @@ async function unlockUrl(targetUrl, options = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) {
-        const backoff = attempt === 1 ? 1000 : 3000;
+        const backoff = 1000;
         console.log(`[Unlocker] Retry ${attempt} for ${targetUrl} after ${backoff}ms`);
         await new Promise(resolve => setTimeout(resolve, backoff));
       }
@@ -129,7 +129,7 @@ async function unlockUrl(targetUrl, options = {}) {
           },
           body: JSON.stringify(payload)
         },
-        90000
+        30000
       );
 
       if (!response.ok) {
@@ -164,7 +164,7 @@ async function unlockUrl(targetUrl, options = {}) {
       
       if (err.name === 'AbortError') {
         if (attempt < retries) continue;
-        throw new Error('Unlocker request timed out (taking longer than 90s)');
+        throw new Error('Unlocker request timed out (taking longer than 30s)');
       }
       
       // Don't retry on non-5xx errors
@@ -353,7 +353,7 @@ async function lensSearch(imageUrl, options = {}) {
           },
           body: JSON.stringify(payload)
         },
-        90000
+        45000
       );
 
       if (!response.ok) {
@@ -388,7 +388,7 @@ async function lensSearch(imageUrl, options = {}) {
           console.warn(`[Lens] Attempt ${attempt} timed out, retrying...`);
           continue;
         }
-        throw new Error('Lens request timed out (taking longer than 90s)');
+        throw new Error('Lens request timed out (taking longer than 45s)');
       }
 
       // Retry on network-level failures (ECONNRESET, ENOTFOUND, fetch failed, etc.)
